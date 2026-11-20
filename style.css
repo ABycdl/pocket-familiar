@@ -14,6 +14,12 @@
 
 #pocket-familiar-host.pf-tt-frame[hidden] { display: none !important; }
 
+#pocket-familiar-host.pf-tt-frame[hidden][data-connecting] {
+    display: block !important;
+    visibility: hidden !important;
+    pointer-events: none !important;
+}
+
 #pf-tt-settings .inline-drawer-header {
     width: 100%;
     border: 0;
@@ -21,4 +27,15 @@
     color: inherit;
     font: inherit;
     text-align: start;
+}
+
+#pf-tt-controls .pf-window-toggle {
+    display: inline-flex;
+    width: auto;
+    min-width: max-content;
+    flex: none;
+    writing-mode: horizontal-tb;
+    white-space: nowrap;
+    word-break: normal;
+    justify-content: center;
 }

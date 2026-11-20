@@ -7,6 +7,7 @@ const gameURL = new URL('https://persephonesgarden.guanchi.workers.dev/');
 const frameId = 'pocket-familiar-host';
 const registration = Symbol.for('pocket-familiar.extension');
 const installReload = Symbol.for('pocket-familiar.install-reload');
+const getTavern = () => window.SillyTavern?.getContext?.();
 
 export function reloadAfterInstall() {
     if (window[installReload]) return;
@@ -24,7 +25,17 @@ if (!window[registration]) {
         const mount = document.querySelector('#extensions_settings') ?? document.querySelector('#extensions_settings2');
         if (!mount) return;
         observer.disconnect();
-        if (!document.getElementById('pf-tt-settings')) start(mount);
+        if (!document.getElementById('pf-tt-settings')) {
+            const tavern = getTavern();
+            const loaded = tavern?.eventTypes?.EXTENSION_SETTINGS_LOADED;
+            const folder = decodeURIComponent(new URL('.', import.meta.url).pathname.split('/').at(-2));
+            if (loaded) tavern.eventSource?.on(loaded, result => {
+                if (typeof result?.extensionPath !== 'string') return;
+                const installed = result.folderName ?? result.extensionPath.split(/[\\/]/).filter(Boolean).at(-1);
+                if (installed === folder) reloadAfterInstall();
+            });
+            start(mount);
+        }
     }
 }
 
@@ -38,7 +49,7 @@ function start(mount) {
             <i class="inline-drawer-icon fa-solid fa-circle-chevron-down down" aria-hidden="true"></i>
         </button>
         <div id="pf-tt-controls" class="inline-drawer-content">
-            <button type="button" class="menu_button" disabled>显示悬浮窗</button>
+            <button type="button" class="menu_button pf-window-toggle" disabled>显示悬浮窗</button>
         </div>
     </div>`;
     mount.append(settings);
@@ -49,7 +60,6 @@ function start(mount) {
         header.setAttribute('aria-expanded', String(icon.classList.contains('up')));
     }));
     const report = message => window.toastr?.warning(message, '口袋使魔');
-    const getTavern = () => window.SillyTavern?.getContext?.();
     let hostStore;
     const getStore = () => hostStore ??= selectHostStore(getTavern).catch(error => {
         hostStore = null;
@@ -66,7 +76,7 @@ function start(mount) {
     frame.setAttribute('sandbox', 'allow-scripts allow-same-origin allow-downloads');
     frame.setAttribute('allowtransparency', 'true');
     frame.allow = 'fullscreen';
-    let wanted = false, ready = false, port = null, view = null;
+    let starting = true, wanted = false, ready = false, port = null, view = null;
     let bootTimer = null, bootFailed = false, viewTimer = null, latestGeneration = null;
     const send = data => port?.postMessage(packet('control', {data}));
     const controller = createWindow(frame, send, state => {
@@ -104,12 +114,23 @@ function start(mount) {
     function ordinaryFrame() {
         return [...document.querySelectorAll('#' + frameId)].some(element => element !== frame);
     }
+    function updateToggle() {
+        const connecting = wanted && !ready && bootTimer !== null;
+        toggle.disabled = starting || connecting;
+        toggle.textContent = connecting ? '正在连接…' : frame.hidden ? '显示悬浮窗' : '隐藏悬浮窗';
+    }
+    function stopConnecting() {
+        clearTimeout(bootTimer);
+        bootTimer = null;
+        delete frame.dataset.connecting;
+        updateToggle();
+    }
     function checkDuplicate() {
         if (!ordinaryFrame()) return false;
         if (wanted) send({type: 'flush'});
         wanted = false;
         frame.hidden = true;
-        toggle.textContent = '显示悬浮窗';
+        stopConnecting();
         return true;
     }
     new MutationObserver(checkDuplicate).observe(document.body, {childList: true});
@@ -119,17 +140,21 @@ function start(mount) {
         // Legacy game builds must enter their bridge path while the new build is deployed.
         gameURL.searchParams.set('saveBridge', '1');
         gameURL.searchParams.set('parentOrigin', 'https://pocket-familiar-tt.invalid');
-        gameURL.searchParams.set('ttOrigin', window.origin);
+        gameURL.searchParams.set('ttOrigin', window.origin ?? location.origin);
         gameURL.hash = 'tt=' + token;
         bootFailed = false;
         frame.src = gameURL.href;
         if (!frame.isConnected) document.body.append(frame);
+    }
+    function waitForGame() {
         clearTimeout(bootTimer);
+        frame.dataset.connecting = '';
         bootTimer = setTimeout(() => {
             if (!ready) {
                 bootFailed = !port;
-                if (wanted) report('游戏连接超时。请检查网络，再隐藏并重新显示悬浮窗。');
+                if (wanted) report('游戏连接超时。请点击「显示悬浮窗」重试。');
             }
+            stopConnecting();
         }, 15000);
     }
     function setVisible(visible, persist = true) {
@@ -139,8 +164,8 @@ function start(mount) {
             return;
         }
         wanted = visible;
-        toggle.textContent = visible ? '隐藏悬浮窗' : '显示悬浮窗';
         if (visible) {
+            if (!ready) waitForGame();
             if (!frame.isConnected || bootFailed) loadFrame();
             frame.hidden = !ready;
             controller.reportViewport();
@@ -149,8 +174,10 @@ function start(mount) {
             void drainGenerations();
         } else {
             frame.hidden = true;
+            stopConnecting();
             send({type: 'flush'});
         }
+        updateToggle();
         if (persist) void storage.write('settings', {visible}).catch(() => {
             if (wanted === visible) report('悬浮窗状态暂未保存。');
         });
@@ -174,6 +201,7 @@ function start(mount) {
                 if (message.data.type === 'ready') {
                     ready = true;
                     frame.hidden = !wanted;
+                    stopConnecting();
                     sendGeneration();
                 }
                 if (message.data.type === 'hide') setVisible(false);
@@ -184,7 +212,7 @@ function start(mount) {
             if (message.type === 'status') {
                 const messages = {
                     recovered: '当前进度已从有效备份恢复。',
-                    unavailable: '无法读写酒馆存档。请尝试隐藏并重新显示悬浮窗。',
+                    unavailable: '无法读写酒馆存档。请点击「显示悬浮窗」重试。',
                     corrupt: '游戏存档损坏，找不到可恢复的进度。',
                     incompatible: '本地存档来自较新的游戏版本。请更新游戏网站后重试。',
                     conflict: '本地存档已被另一窗口更新，请导出当前进度后重新打开酒馆。',
@@ -192,7 +220,7 @@ function start(mount) {
                     limit: '存档超出桥接容量，请导出当前进度留存。',
                     timeout: '酒馆存档尚未确认。'
                 };
-                clearTimeout(bootTimer);
+                if (!ready && ['unavailable', 'timeout', 'corrupt', 'incompatible'].includes(message.status)) stopConnecting();
                 if (Object.hasOwn(messages, message.status) && wanted && message.status !== lastStatus) report(messages[message.status]);
                 lastStatus = message.status;
                 return;
@@ -227,7 +255,7 @@ function start(mount) {
         }
         generationError = false;
     }
-    toggle.addEventListener('click', () => setVisible(!wanted));
+    toggle.addEventListener('click', () => setVisible(frame.hidden));
     void (async () => {
         await (window.__TAURITAVERN__?.ready ?? window.__TAURITAVERN_MAIN_READY__);
         if (!watchGenerations(getTavern, id => {
@@ -250,5 +278,8 @@ function start(mount) {
         const saved = preference.value?.value;
         const visible = typeof saved?.visible === 'boolean' ? saved.visible : saved?.autoShow !== false;
         setVisible(visible, false);
-    })().catch(() => report('口袋使魔初始化失败。')).finally(() => { toggle.disabled = false; });
+    })().catch(() => report('口袋使魔初始化失败。')).finally(() => {
+        starting = false;
+        updateToggle();
+    });
 }

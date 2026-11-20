@@ -2,10 +2,11 @@ import {counter, newId, readRecord, validId} from './wire.js';
 
 const namespace = 'pocket-familiar';
 const slots = ['save-a', 'save-b'];
+const keys = [...slots, 'generations', 'settings', 'window'];
+const migrationKey = 'migration';
 const recordFields = ({id, revision, json, checksum}) => ({id, revision, json, checksum});
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 export async function selectHostStore(getTavern) {
     const ready = window.__TAURITAVERN__?.ready ?? window.__TAURITAVERN_MAIN_READY__;
@@ -18,67 +19,80 @@ export async function selectHostStore(getTavern) {
 }
 
 export function createSillyTavernStore(getTavern) {
-    let reading = null;
-    function context() {
-        const tavern = getTavern();
-        if (!isObject(tavern?.extensionSettings) || typeof tavern.getRequestHeaders !== 'function'
-            || typeof tavern.saveSettingsDebounced !== 'function') throw Error('SillyTavern extension settings unavailable');
-        return tavern;
-    }
-    async function readSettings(tavern) {
+    let migration = null;
+    const filename = key => `${namespace}-${key}.json`;
+    const path = key => '/user/files/' + filename(key);
+    async function request(url, options) {
         const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 1500);
+        const timeout = setTimeout(() => controller.abort(), 6000);
         try {
-            const response = await fetch('/api/settings/get', {
-                method: 'POST', headers: tavern.getRequestHeaders(), body: '{}',
-                cache: 'no-store', credentials: 'same-origin', signal: controller.signal
-            });
-            if (!response.ok) throw Error('SillyTavern settings read failed');
-            const data = await response.json();
-            const settings = typeof data.settings === 'string' ? JSON.parse(data.settings) : data.settings;
-            if (!isObject(settings)) throw Error('Invalid SillyTavern settings response');
-            const extensions = settings.extension_settings;
-            if (extensions === undefined || isObject(extensions) && !Object.hasOwn(extensions, namespace)) return undefined;
-            if (!isObject(extensions?.[namespace])) throw Error('Invalid Pocket Familiar settings');
-            return extensions[namespace];
+            const response = await fetch(url, {...options, cache: 'no-store', credentials: 'same-origin', signal: controller.signal});
+            if (response.status === 404 && !options) return {found: false};
+            if (!response.ok) throw Error(`SillyTavern storage request failed (${response.status})`);
+            return {found: true, value: await response.json()};
         } finally {
             clearTimeout(timeout);
         }
     }
-    function read(tavern) {
-        reading ??= readSettings(tavern).finally(() => { reading = null; });
-        return reading;
+    function post(url, data) {
+        const tavern = getTavern();
+        if (typeof tavern?.getRequestHeaders !== 'function') throw Error('SillyTavern request headers unavailable');
+        return request(url, {method: 'POST', headers: tavern.getRequestHeaders(), body: JSON.stringify(data)});
+    }
+    async function upload(key, value) {
+        const bytes = new TextEncoder().encode(JSON.stringify(value));
+        let binary = '';
+        for (let i = 0; i < bytes.length; i += 32768) {
+            binary += String.fromCharCode(...bytes.subarray(i, i + 32768));
+        }
+        const result = await post('/api/files/upload', {name: filename(key), data: btoa(binary)});
+        if (result.value?.path !== path(key)) throw Error('SillyTavern file write not confirmed');
+        const saved = await request(path(key));
+        if (!saved.found || !same(saved.value, value)) throw Error('SillyTavern file changed during save');
+    }
+    async function migrate() {
+        const marker = await request(path(migrationKey));
+        if (marker.found) {
+            if (marker.value?.version !== 1) throw Error('Unknown Pocket Familiar storage version');
+            return;
+        }
+        const {value: data} = await post('/api/settings/get', {});
+        const settings = typeof data?.settings === 'string' ? JSON.parse(data.settings) : data?.settings;
+        if (!isObject(settings)) throw Error('Invalid SillyTavern settings response');
+        const legacy = settings.extension_settings?.[namespace];
+        if (legacy !== undefined && !isObject(legacy)) throw Error('Invalid Pocket Familiar settings');
+        // A previous migration may have stopped halfway through. Keep files
+        // already copied and write the marker only when every key is migrated.
+        await Promise.all(keys.filter(key => legacy && Object.hasOwn(legacy, key)).map(async key => {
+            if (!(await request(path(key))).found) await upload(key, legacy[key]);
+        }));
+        await upload(migrationKey, {version: 1});
+    }
+    function ensureMigrated() {
+        migration ??= migrate().catch(error => {
+            migration = null;
+            throw error;
+        });
+        return migration;
+    }
+    function checkKey(key) {
+        if (!keys.includes(key)) throw Error('Unknown Pocket Familiar storage key');
     }
     return {
         async tryGetJson({key}) {
-            const stored = await read(context());
-            return stored && Object.hasOwn(stored, key) ? {found: true, value: stored[key]} : {found: false};
+            checkKey(key);
+            await ensureMigrated();
+            try {
+                return await request(path(key));
+            } catch (error) {
+                if (error instanceof SyntaxError) throw Error('Invalid Pocket Familiar file', {cause: error});
+                throw error;
+            }
         },
         async setJson({key, value}) {
-            const tavern = context();
-            const settings = tavern.extensionSettings;
-            const before = await read(tavern);
-            const candidate = {...before, [key]: value};
-            let observed = before;
-            settings[namespace] = candidate;
-            try {
-                if (same(candidate, before)) return;
-                // The documented host debounce queues the write. It is only
-                // acknowledged after the host's settings endpoint returns it.
-                tavern.saveSettingsDebounced();
-                for (const wait of [1100, 350, 700, 1100]) {
-                    await delay(wait);
-                    try { observed = await readSettings(tavern); } catch { continue; }
-                    if (same(observed, candidate)) return;
-                    if (!same(observed, before)) throw Error('SillyTavern settings changed during save');
-                }
-                throw Error('SillyTavern settings save unconfirmed');
-            } finally {
-                if (settings[namespace] === candidate && !same(observed, candidate)) {
-                    if (observed === undefined) delete settings[namespace];
-                    else settings[namespace] = observed;
-                }
-            }
+            checkKey(key);
+            await ensureMigrated();
+            await upload(key, value);
         }
     };
 }
