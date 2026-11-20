@@ -1,0 +1,24 @@
+#pocket-familiar-host.pf-tt-frame {
+    position: fixed;
+    left: 20px;
+    top: 70px;
+    width: 330px;
+    height: 410px;
+    border: 0 !important;
+    outline: 0 !important;
+    box-shadow: none !important;
+    background: transparent !important;
+    z-index: 2147483000;
+    color-scheme: normal;
+}
+
+#pocket-familiar-host.pf-tt-frame[hidden] { display: none !important; }
+
+#pf-tt-settings .inline-drawer-header {
+    width: 100%;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    text-align: start;
+}

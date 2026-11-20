@@ -1,0 +1,13 @@
+{
+  "display_name": "口袋使魔",
+  "loading_order": 50,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "hooks": {
+    "install": "reloadAfterInstall"
+  },
+  "version": "1.0.0",
+  "author": "口袋使魔"
+}
